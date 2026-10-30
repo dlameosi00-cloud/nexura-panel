@@ -364,6 +364,7 @@ function doDelete(i){DB.k=DB.k.filter(x=>x.i!==i);markDirty();dlgClose();render(
 function menuMore(){
   dlg(`<h3>Ещё</h3>
     <div class="btnrow" style="flex-direction:column;align-items:stretch">
+      <button class="pri" onclick="dlgRequests()">Запросы устройств</button>
       <button onclick="exportDb()">Скачать бэкап (db.json)</button>
       <button onclick="dlgImport()">Импорт из бэкапа</button>
       <button onclick="dlgReload()">Перезагрузить базу с GitHub</button>
@@ -396,6 +397,50 @@ function doImport(){
 }
 function dlgReload(){dlgClose();boot();toast('Перезагрузка базы...');}
 function logout(){localStorage.removeItem('nx_admin_token');location.reload();}
+
+/* ---------- device requests (GitHub issues, prefix NWR) ---------- */
+async function dlgRequests(){
+  dlg(`<h3>Запросы устройств</h3><div id="reqlist" class="muted">Загрузка…</div>`);
+  try{
+    const r=await api(`/repos/${OWNER}/${REPO}/issues?state=open&per_page=50`);
+    const list=await r.json();
+    const reqs=list.filter(x=>(x.title||'').startsWith('NWR '));
+    if(!reqs.length){$('reqlist').innerHTML='<p class="muted">Открытых запросов нет.</p>';return;}
+    $('reqlist').innerHTML=reqs.map(x=>{
+      const p=(x.title||'').split(' ');
+      const hw=(p[1]||'').toUpperCase().slice(0,16);
+      const model=esc(p.slice(2).join(' ')||'unknown device');
+      return `<div class="card" style="margin:10px 0">
+        <b>${model}</b>
+        <div class="muted" style="letter-spacing:1px">${hw}</div>
+        <div style="display:flex;gap:6px;margin-top:10px;align-items:center">
+          <select id="rt${x.number}" style="padding:8px;border-radius:10px">
+            ${TIERS.map((t,i)=>`<option value="${i}" ${i===2?'selected':''}>${t.n}</option>`).join('')}
+          </select>
+          <button class="sm" onclick="accReq(${x.number},'${hw}')">Принять</button>
+          <button class="sm dg" onclick="rejReq(${x.number})">Отклонить</button>
+        </div></div>`;
+    }).join('');
+  }catch(e){$('reqlist').innerHTML='<p class="muted">'+esc(String(e))+'</p>';}
+}
+async function closeIssue(n){
+  await api(`/repos/${OWNER}/${REPO}/issues/${n}`,{method:'PATCH',body:JSON.stringify({state:'closed'})});
+}
+async function accReq(n,hw){
+  try{
+    const tier=+$('rt'+n).value;
+    const days=TIERS[tier].d;
+    if(DB.k.some(x=>x.h===hw)){await closeIssue(n);dlgRequests();toast('Уже одобрено: '+hw);return;}
+    DB.k.unshift({i:genKey(),h:hw,e:days?addDays(new Date(),days):'',t:tier,c:Math.floor(Date.now()/1000),n:'запрос устройства',d:0});
+    markDirty();await saveDb();
+    await closeIssue(n);
+    dlgRequests();toast('Одобрено: '+hw+' — разблокировка в течение ~10 сек');
+  }catch(e){toast(String(e));}
+}
+async function rejReq(n){
+  try{await closeIssue(n);dlgRequests();toast('Запрос отклонён');}
+  catch(e){toast(String(e));}
+}
 
 /* ---------- boot ---------- */
 function login(){
