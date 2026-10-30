@@ -103,7 +103,7 @@ code{background:var(--bg2);padding:2px 6px;border-radius:6px;font-size:12.5px}
 
 <div class="toolbar" id="toolbar" style="display:none">
   <div class="wrap" style="max-width:920px;margin:0 auto">
-    <button class="pri" onclick="dlgApprove()">✓ Одобрить устройство</button>
+    <button class="pri" id="reqBtn" onclick="dlgRequests()">Запросы</button>
     <button onclick="dlgNew()">＋ Новый ключ</button>
     <button id="saveBtn" onclick="saveDb()">Сохранить</button>
     <button class="gh" onclick="menuMore()" title="Ещё">☰</button>
@@ -120,6 +120,37 @@ const TIERS=[{n:'Day',d:1},{n:'Week',d:7},{n:'Month',d:30},{n:'Perm',d:0}];
 const TIER_RU=['DAY','WEEK','MONTH','PERM'];
 let TOKEN=localStorage.getItem('nx_admin_token')||'';
 let DB=null, SHA='', DIRTY=false, VIEW=[];
+
+/* ---------- realtime channel (ntfy.sh): requests, presence, sync ---------- */
+const NT='nxrca7aa9e341e67c3a620fe6e5';
+let NTHB={}, NTREQ={};
+const NTDISM=new Set(JSON.parse(localStorage.getItem('nx_dismiss')||'[]'));
+function saveDism(){localStorage.setItem('nx_dismiss',JSON.stringify([...NTDISM]));}
+async function postNT(m){try{await fetch(`https://ntfy.sh/${NT}`,{method:'POST',body:m});}catch(e){}}
+let NTLAST=0;
+async function getNT(){
+  const since=NTLAST?NTLAST-60:Math.floor(Date.now()/1000)-12*3600;
+  const r=await fetch(`https://ntfy.sh/${NT}/json?poll=1&since=${since}`);
+  const t=await r.text();
+  NTLAST=Math.floor(Date.now()/1000);
+  const hb={},rq={};
+  for(const line of t.split('\n')){
+    if(!line)continue;
+    let j;try{j=JSON.parse(line);}catch(e){continue;}
+    if(j.event!=='message'||!j.message)continue;
+    const p=j.message.split('|');
+    if(p.length<3)continue;
+    const rec={model:p[2]||'?',ts:j.time||0};
+    if(p[0]==='HB')hb[p[1]]=rec;
+    else if(p[0]==='REQ')rq[p[1]]=rec;
+  }
+  Object.assign(NTHB,hb);Object.assign(NTREQ,rq);
+  const pend=Object.keys(NTREQ).filter(h=>!NTDISM.has(h)).length;
+  const rb=$('reqBtn');if(rb)rb.textContent=pend?`Запросы (${pend})`:'Запросы';
+  if(DB)render();
+}
+function onlineOf(h){const x=h&&NTHB[h];return x&&(Date.now()/1000-x.ts)<300?x:null;}
+setInterval(()=>{if(DB)getNT().catch(()=>{});},20000);
 
 const $=id=>document.getElementById(id);
 const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
@@ -199,23 +230,26 @@ function render(){
   const list=$('list');VIEW=[];
   if(!DB){list.innerHTML='';return;}
   for(const k of DB.k)if(matches(k))VIEW.push(k);
-  const st={all:DB.k.length,act:0,exp:0,unb:0,frz:0};
+  const st={all:DB.k.length,act:0,exp:0,unb:0,frz:0,on:0};
   DB.k.forEach(k=>{ if(k.d)st.frz++; else if(!k.h)st.unb++;
-    else if(daysLeft(k.e)<0)st.exp++; else st.act++;});
+    else if(daysLeft(k.e)<0)st.exp++; else st.act++;
+    if(onlineOf(k.h))st.on++;});
   $('stats').innerHTML=
     `<div class="stat"><b>${st.all}</b><span>всего</span></div>
      <div class="stat"><b style="color:var(--ok)">${st.act}</b><span>актив</span></div>
+     <div class="stat"><b style="color:var(--ok)">● ${st.on}</b><span>в сети</span></div>
      <div class="stat"><b style="color:var(--warn)">${st.unb}</b><span>без HWID</span></div>
      <div class="stat"><b style="color:var(--bad)">${st.exp}</b><span>истекли</span></div>
      <div class="stat"><b style="color:var(--dim)">${st.frz}</b><span>заморожен</span></div>`;
   if(!VIEW.length){list.innerHTML='<div class="empty">Ничего не найдено.<br>Выдай первый ключ кнопкой «Новый ключ» ↓</div>';return;}
   list.innerHTML=VIEW.map(k=>{
-    const s=stateOf(k),dl=daysLeft(k.e);
+    const s=stateOf(k),dl=daysLeft(k.e),hb=onlineOf(k.h);
     return `<div class="card">
       <div class="row">
         <div>
           <div class="keyid">${fmtKey(k.i)}</div>
           <div class="keyhw">${k.h?('HWID '+esc(k.h)):'HWID не привязан'}</div>
+          ${k.h?`<div class="keyhw" style="color:${hb?'var(--ok)':'var(--dim)'}">${hb?('● в сети · '+esc(hb.model)):'○ оффлайн'}</div>`:''}
         </div>
         <span class="spacer"></span>
         <span class="badge b-acc">${TIER_RU[k.t]}</span>
@@ -267,7 +301,7 @@ function dlgApprove(){
 function pickATier(btn,ix){window._atier=ix;
   document.querySelectorAll('#atp button').forEach(b=>b.classList.remove('on'));
   btn.classList.add('on');}
-function doApprove(){
+async function doApprove(){
   const h=cleanHex($('ah').value);
   if(!h){toast('Нужен код из 16 hex символов');return;}
   const dup=DB.k.find(x=>x.h===h);
@@ -276,6 +310,7 @@ function doApprove(){
   const e=days?addDays(new Date(),days):'';
   const k={i:genKey(),h,e,t:window._atier,c:Math.floor(Date.now()/1000),n:$('an').value.trim(),d:0};
   DB.k.unshift(k);markDirty();dlgClose();render();
+  try{await saveDb();await postNT('SYNC|'+Math.floor(Date.now()/1000));}catch(e2){toast(String(e2));}
   toast('Устройство одобрено до: '+(e||'бессрочно'));
 }
 
@@ -299,10 +334,11 @@ function pickTier(btn,ix){window._tier=ix;
   btn.classList.add('on');
   const d=TIERS[ix].d;
   $('ne').value=d?addDays(new Date(),d):'';$('ne').disabled=!d;}
-function doNew(){
+async function doNew(){
   const k={i:genKey(),h:cleanHex($('nh').value)||'',e:$('ne').value||'',
     t:window._tier,c:Math.floor(Date.now()/1000),n:$('nn').value.trim(),d:0};
   DB.k.unshift(k);markDirty();dlgClose();render();
+  try{await saveDb();}catch(e){toast(String(e));}
   toast('Ключ создан: '+fmtKey(k.i));
 }
 function dlgHwid(i){
@@ -315,10 +351,12 @@ function dlgHwid(i){
       <button class="pri" onclick="doHwid('${i}')">Сохранить</button>
     </div>`);
 }
-function doHwid(i){
+async function doHwid(i){
   const k=DB.k.find(x=>x.i===i);
   k.h=cleanHex($('hw').value);
-  markDirty();dlgClose();render();toast(k.h?'HWID обновлён':'HWID снят (ключ станет не привязанным)');
+  markDirty();dlgClose();render();
+  try{await saveDb();await postNT('SYNC|'+Math.floor(Date.now()/1000));}catch(e){toast(String(e));}
+  toast(k.h?'HWID обновлён':'HWID снят (ключ станет не привязанным)');
 }
 function dlgExtend(i){
   const k=DB.k.find(x=>x.i===i);
@@ -335,14 +373,16 @@ function dlgExtend(i){
       <button class="pri" onclick="doExt('${i}',-1,true)">Применить дату</button>
     </div>`);
 }
-function doExt(i,d,useDate){
+async function doExt(i,d,useDate){
   const k=DB.k.find(x=>x.i===i);
   if(useDate){k.e=$('ed').value||'';}
   else if(d===0){k.e='';k.t=3;}
   else{const base=(k.e&&daysLeft(k.e)>-4000)?new Date(k.e+'T12:00:00'):new Date();
     if(daysLeft(k.e)<0||!k.e)base.setTime(Date.now());
     k.e=addDays(base,d);k.t=d>=30?2:1;}
-  markDirty();dlgClose();render();toast('Срок обновлён: '+(k.e||'бессрочно'));
+  markDirty();dlgClose();render();
+  try{await saveDb();await postNT('SYNC|'+Math.floor(Date.now()/1000));}catch(e){toast(String(e));}
+  toast('Срок обновлён: '+(k.e||'бессрочно'));
 }
 function dlgNote(i){
   const k=DB.k.find(x=>x.i===i);
@@ -350,21 +390,33 @@ function dlgNote(i){
     <div class="dlg-actions"><button onclick="dlgClose()">Отмена</button>
     <button class="pri" onclick="doNote('${i}')">Сохранить</button></div>`);
 }
-function doNote(i){const k=DB.k.find(x=>x.i===i);k.n=$('nn').value.trim();
-  markDirty();dlgClose();render();}
-function toggleFreeze(i){const k=DB.k.find(x=>x.i===i);k.d=k.d?0:1;
-  markDirty();render();toast(k.d?'Ключ заморожен — чит откажет в входе':'Ключ разморожен');}
+async function doNote(i){const k=DB.k.find(x=>x.i===i);k.n=$('nn').value.trim();
+  markDirty();dlgClose();render();
+  try{await saveDb();}catch(e){toast(String(e));}}
+async function toggleFreeze(i){
+  const k=DB.k.find(x=>x.i===i);k.d=k.d?0:1;markDirty();render();
+  try{await saveDb();}catch(e){toast(String(e));}
+  if(k.h)await postNT(k.d?`REV|${k.h}|${Math.floor(Date.now()/1000)}`
+                        :`SYNC|${Math.floor(Date.now()/1000)}`);
+  toast(k.d?'Ключ заморожен — доступ отозван':'Ключ разморожен');
+}
 function dlgDelete(i){
   dlg(`<h3>Удалить ключ?</h3><p class="muted">${fmtKey(i)} — покупатель потеряет доступ при следующей проверке.</p>
     <div class="dlg-actions"><button onclick="dlgClose()">Отмена</button>
     <button class="dg" onclick="doDelete('${i}')">Удалить</button></div>`);
 }
-function doDelete(i){DB.k=DB.k.filter(x=>x.i!==i);markDirty();dlgClose();render();toast('Удалено');}
+async function doDelete(i){
+  const k=DB.k.find(x=>x.i===i);
+  DB.k=DB.k.filter(x=>x.i!==i);markDirty();dlgClose();
+  try{await saveDb();}catch(e){toast(String(e));}
+  if(k&&k.h)await postNT(`REV|${k.h}|${Math.floor(Date.now()/1000)}`);
+  render();toast(k&&k.h?'Удалено — доступ отозван':'Удалено');
+}
 
 function menuMore(){
   dlg(`<h3>Ещё</h3>
     <div class="btnrow" style="flex-direction:column;align-items:stretch">
-      <button class="pri" onclick="dlgRequests()">Запросы устройств</button>
+      <button onclick="dlgApprove()">Одобрить устройство (вручную)</button>
       <button onclick="exportDb()">Скачать бэкап (db.json)</button>
       <button onclick="dlgImport()">Импорт из бэкапа</button>
       <button onclick="dlgReload()">Перезагрузить базу с GitHub</button>
@@ -398,49 +450,50 @@ function doImport(){
 function dlgReload(){dlgClose();boot();toast('Перезагрузка базы...');}
 function logout(){localStorage.removeItem('nx_admin_token');location.reload();}
 
-/* ---------- device requests (GitHub issues, prefix NWR) ---------- */
+/* ---------- device requests (realtime channel) ---------- */
+function ago(ts){
+  const d=Math.max(0,Math.floor(Date.now()/1000-ts));
+  if(d<60)return d+' сек назад';
+  if(d<3600)return Math.floor(d/60)+' мин назад';
+  return Math.floor(d/3600)+' ч назад';
+}
 async function dlgRequests(){
   dlg(`<h3>Запросы устройств</h3><div id="reqlist" class="muted">Загрузка…</div>`);
-  try{
-    const r=await api(`/repos/${OWNER}/${REPO}/issues?state=open&per_page=50`);
-    const list=await r.json();
-    const reqs=list.filter(x=>(x.title||'').startsWith('NWR '));
-    if(!reqs.length){$('reqlist').innerHTML='<p class="muted">Открытых запросов нет.</p>';return;}
-    $('reqlist').innerHTML=reqs.map(x=>{
-      const p=(x.title||'').split(' ');
-      const hw=(p[1]||'').toUpperCase().slice(0,16);
-      const model=esc(p.slice(2).join(' ')||'unknown device');
-      return `<div class="card" style="margin:10px 0">
-        <b>${model}</b>
-        <div class="muted" style="letter-spacing:1px">${hw}</div>
-        <div style="display:flex;gap:6px;margin-top:10px;align-items:center">
-          <select id="rt${x.number}" style="padding:8px;border-radius:10px">
-            ${TIERS.map((t,i)=>`<option value="${i}" ${i===2?'selected':''}>${t.n}</option>`).join('')}
-          </select>
-          <button class="sm" onclick="accReq(${x.number},'${hw}')">Принять</button>
-          <button class="sm dg" onclick="rejReq(${x.number})">Отклонить</button>
-        </div></div>`;
-    }).join('');
-  }catch(e){$('reqlist').innerHTML='<p class="muted">'+esc(String(e))+'</p>';}
+  try{await getNT();}catch(e){}
+  const reqs=Object.entries(NTREQ).filter(([h])=>!NTDISM.has(h))
+    .sort((a,b)=>b[1].ts-a[1].ts);
+  if(!reqs.length){
+    $('reqlist').innerHTML='<p class="muted">Запросов нет. Покупатель жмёт SEND REQUEST в чите — запрос появится здесь сам.</p>';
+    return;
+  }
+  $('reqlist').innerHTML=reqs.map(([hw,x])=>`<div class="card" style="margin:10px 0">
+      <b>${esc(x.model)}</b>
+      <div class="muted" style="letter-spacing:1px">${hw}</div>
+      <div class="muted">${ago(x.ts)}</div>
+      <div style="display:flex;gap:6px;margin-top:10px;align-items:center">
+        <select id="rt${hw}" style="padding:8px;border-radius:10px">
+          ${TIERS.map((t,i)=>`<option value="${i}" ${i===2?'selected':''}>${t.n}</option>`).join('')}
+        </select>
+        <button class="sm" onclick="accReq('${hw}')">Принять</button>
+        <button class="sm dg" onclick="rejReq('${hw}')">Скрыть</button>
+      </div></div>`).join('');
 }
-async function closeIssue(n){
-  await api(`/repos/${OWNER}/${REPO}/issues/${n}`,{method:'PATCH',body:JSON.stringify({state:'closed'})});
-}
-async function accReq(n,hw){
+async function accReq(hw){
   try{
-    const tier=+$('rt'+n).value;
+    const tier=+$('rt'+hw).value;
     const days=TIERS[tier].d;
-    if(DB.k.some(x=>x.h===hw)){await closeIssue(n);dlgRequests();toast('Уже одобрено: '+hw);return;}
-    DB.k.unshift({i:genKey(),h:hw,e:days?addDays(new Date(),days):'',t:tier,c:Math.floor(Date.now()/1000),n:'запрос устройства',d:0});
-    markDirty();await saveDb();
-    await closeIssue(n);
-    dlgRequests();toast('Одобрено: '+hw+' — разблокировка в течение ~10 сек');
+    if(!DB.k.some(x=>x.h===hw)){
+      DB.k.unshift({i:genKey(),h:hw,e:days?addDays(new Date(),days):'',t:tier,
+        c:Math.floor(Date.now()/1000),n:(NTREQ[hw]?.model||'запрос устройства'),d:0});
+      markDirty();await saveDb();
+    }
+    await postNT('SYNC|'+Math.floor(Date.now()/1000));
+    NTDISM.add(hw);saveDism();
+    dlgClose();render();
+    toast('Одобрено '+hw+' — разблокировка до ~15 сек');
   }catch(e){toast(String(e));}
 }
-async function rejReq(n){
-  try{await closeIssue(n);dlgRequests();toast('Запрос отклонён');}
-  catch(e){toast(String(e));}
-}
+function rejReq(hw){NTDISM.add(hw);saveDism();dlgRequests();toast('Скрыто');}
 
 /* ---------- boot ---------- */
 function login(){
@@ -455,6 +508,7 @@ async function boot(){
   $('list').innerHTML='<div class="loader">Загрузка базы...</div>';
   try{
     await loadDb();render();
+    getNT().catch(()=>{});
     toast('База загружена: ключей '+(DB.k?.length||0));
   }catch(e){
     $('list').innerHTML='';
