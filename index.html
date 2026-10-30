@@ -140,7 +140,9 @@ async function getNT(){
     if(j.event!=='message'||!j.message)continue;
     const p=j.message.split('|');
     if(p.length<3)continue;
-    const rec={model:p[2]||'?',ts:j.time||0};
+    const rec={model:p[2]||'?',ts:j.time||0,
+      alt:(p[4]||'').toUpperCase().slice(0,16),
+      android:p[5]||''};
     if(p[0]==='HB')hb[p[1]]=rec;
     else if(p[0]==='REQ')rq[p[1]]=rec;
   }
@@ -148,6 +150,7 @@ async function getNT(){
   const pend=Object.keys(NTREQ).filter(h=>!NTDISM.has(h)).length;
   const rb=$('reqBtn');if(rb)rb.textContent=pend?`Запросы (${pend})`:'Запросы';
   if(DB)render();
+  if($('dlg').open&&$('reqlist'))renderReqList();
 }
 function onlineOf(h){const x=h&&NTHB[h];return x&&(Date.now()/1000-x.ts)<300?x:null;}
 setInterval(()=>{if(DB)getNT().catch(()=>{});},20000);
@@ -457,30 +460,42 @@ function ago(ts){
   if(d<3600)return Math.floor(d/60)+' мин назад';
   return Math.floor(d/3600)+' ч назад';
 }
-async function dlgRequests(){
-  dlg(`<h3>Запросы устройств</h3><div id="reqlist" class="muted">Загрузка…</div>`);
-  try{await getNT();}catch(e){}
+function copyHW(h){navigator.clipboard.writeText(h)
+  .then(()=>toast('Скопировано: '+h))
+  .catch(()=>toast('Не удалось скопировать'));}
+function renderReqList(){
+  const el=$('reqlist');if(!el)return;
   const reqs=Object.entries(NTREQ).filter(([h])=>!NTDISM.has(h))
     .sort((a,b)=>b[1].ts-a[1].ts);
   if(!reqs.length){
-    $('reqlist').innerHTML='<p class="muted">Запросов нет. Покупатель жмёт SEND REQUEST в чите — запрос появится здесь сам.</p>';
+    el.innerHTML='<p class="muted">Запросов нет. Покупатель жмёт SEND REQUEST в чите — запрос появится здесь сам.</p>';
     return;
   }
-  $('reqlist').innerHTML=reqs.map(([hw,x])=>`<div class="card" style="margin:10px 0">
-      <b>${esc(x.model)}</b>
-      <div class="muted" style="letter-spacing:1px">${hw}</div>
-      <div class="muted">${ago(x.ts)}</div>
-      <div style="display:flex;gap:6px;margin-top:10px;align-items:center">
+  el.innerHTML=reqs.map(([hw,x])=>{
+    const alt=x.alt&&x.alt!==hw;
+    return `<div class="card" style="margin:10px 0">
+      <b>${esc(x.model)}</b><span class="muted">${x.android&&x.android!=='?'?(' · Android '+esc(x.android)):''} · ${ago(x.ts)}</span>
+      <div style="margin:8px 0 2px;font-family:monospace;letter-spacing:1px;font-size:15px">${hw} <button class="sm" onclick="copyHW('${hw}')">копировать</button></div>
+      ${alt?`<div class="muted" style="font-family:monospace;letter-spacing:1px;font-size:15px;margin-bottom:2px">${esc(x.alt)} <button class="sm" onclick="copyHW('${esc(x.alt)}')">копировать</button></div>`:''}
+      <div style="display:flex;gap:6px;margin-top:10px;align-items:center;flex-wrap:wrap">
         <select id="rt${hw}" style="padding:8px;border-radius:10px">
           ${TIERS.map((t,i)=>`<option value="${i}" ${i===2?'selected':''}>${t.n}</option>`).join('')}
         </select>
         <button class="sm" onclick="accReq('${hw}')">Принять</button>
+        ${alt?`<button class="sm" onclick="accReq('${esc(x.alt)}','${hw}')">Принять код 2</button>`:''}
         <button class="sm dg" onclick="rejReq('${hw}')">Скрыть</button>
-      </div></div>`).join('');
+      </div></div>`;
+  }).join('');
 }
-async function accReq(hw){
+async function dlgRequests(){
+  dlg(`<h3>Запросы устройств</h3><div id="reqlist" class="muted">Загрузка…</div>`);
+  try{await getNT();}catch(e){}
+  renderReqList();
+}
+async function accReq(hw,src){
   try{
-    const tier=+$('rt'+hw).value;
+    src=src||hw;
+    const tier=+$('rt'+src).value;
     const days=TIERS[tier].d;
     if(!DB.k.some(x=>x.h===hw)){
       DB.k.unshift({i:genKey(),h:hw,e:days?addDays(new Date(),days):'',t:tier,
