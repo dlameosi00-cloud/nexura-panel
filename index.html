@@ -103,6 +103,7 @@ code{background:var(--bg2);padding:2px 6px;border-radius:6px;font-size:12.5px}
 
 <div class="toolbar" id="toolbar" style="display:none">
   <div class="wrap" style="max-width:920px;margin:0 auto">
+    <button class="pri" onclick="dlgApprove()">✓ Одобрить устройство</button>
     <button onclick="dlgNew()">＋ Новый ключ</button>
     <button id="saveBtn" onclick="saveDb()">Сохранить</button>
     <button class="gh" onclick="menuMore()" title="Ещё">☰</button>
@@ -244,6 +245,39 @@ function copyKey(i){
 /* ---------- dialogs ---------- */
 function dlg(html){const d=$('dlg');d.innerHTML=html;d.showModal();}
 function dlgClose(){$('dlg').close();}
+
+/* approve device: buyer sends his 16-hex code, admin grants a duration */
+function dlgApprove(){
+  dlg(`<h3>Одобрить устройство</h3>
+    <p class="muted">Покупатель жмёт «SEND REQUEST» в чите и присылает код из 16 символов. Вставь его здесь — устройство разблокируется само в течение 30 секунд.</p>
+    <label>Код устройства (HWID)</label><input id="ah" placeholder="например A1B2C3D4E5F60718" autocomplete="off">
+    <label>Срок</label><div class="tierpick" id="atp">
+      <button onclick="pickATier(this,0)">День</button>
+      <button onclick="pickATier(this,1)">Неделя</button>
+      <button class="on" onclick="pickATier(this,2)">Месяц</button>
+      <button onclick="pickATier(this,3)">Бессрочно</button>
+    </div>
+    <label>Заметка (ник покупателя)</label><input id="an" placeholder="tg: @...">
+    <div class="dlg-actions">
+      <button onclick="dlgClose()">Отмена</button>
+      <button class="pri" onclick="doApprove()">Одобрить</button>
+    </div>`);
+  window._atier=2;setTimeout(()=>$('ah').focus(),50);
+}
+function pickATier(btn,ix){window._atier=ix;
+  document.querySelectorAll('#atp button').forEach(b=>b.classList.remove('on'));
+  btn.classList.add('on');}
+function doApprove(){
+  const h=cleanHex($('ah').value);
+  if(!h){toast('Нужен код из 16 hex символов');return;}
+  const dup=DB.k.find(x=>x.h===h);
+  if(dup){toast('Этот код уже одобрен: '+fmtKey(dup.i));return;}
+  const days=TIERS[window._atier].d;
+  const e=days?addDays(new Date(),days):'';
+  const k={i:genKey(),h,e,t:window._atier,c:Math.floor(Date.now()/1000),n:$('an').value.trim(),d:0};
+  DB.k.unshift(k);markDirty();dlgClose();render();
+  toast('Устройство одобрено до: '+(e||'бессрочно'));
+}
 
 function dlgNew(){
   const t=new Date();t.setDate(t.getDate()+30);
